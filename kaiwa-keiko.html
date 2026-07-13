@@ -372,6 +372,9 @@ function speak(text, onDone){
 /* ========== 音声認識 ========== */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recog=null, interimEl=null, micStream=null;
+let silenceTimer=null;
+const SPEECH_PAUSE_MS=900;  // 話し終えてからこの時間で聞き取りを打ち切り、すぐに応答へ進む
+  // （ブラウザ内蔵の無音判定は数秒かかることがあるため、自前で早めに区切る）
 
 async function ensureMicPermission(){
   // マイクを一度取得して保持し続けることで、セッション中の再許可ダイアログを防ぐ
@@ -388,6 +391,7 @@ async function startRecognition(){
   }
   if(state.recognizing) return;
   speechSynthesis.cancel();
+  clearTimeout(silenceTimer);
   await ensureMicPermission();
   recog = new SR();
   recog.lang = LANG_CONF[state.lang].sttLang;
@@ -410,8 +414,15 @@ async function startRecognition(){
       else interim += e.results[i][0].transcript;
     }
     if(interimEl) interimEl.querySelector(".bubble").textContent = finalText + interim || "…";
+    // 発話のたびにタイマーをリセット。話し終えて無音がSPEECH_PAUSE_MS続いたら
+    // ブラウザの無音判定を待たずに自分から聞き取りを打ち切り、すぐ応答へ進める
+    clearTimeout(silenceTimer);
+    silenceTimer=setTimeout(()=>{
+      if(state.recognizing){ try{ recog.stop(); }catch(e){} }
+    }, SPEECH_PAUSE_MS);
   };
   recog.onerror = e=>{
+    clearTimeout(silenceTimer);
     if(e.error==="not-allowed" || e.error==="service-not-allowed"){
       stopSession();
       micStatus.textContent="マイクの使用が許可されていません。ブラウザの設定をご確認ください。";
@@ -422,6 +433,7 @@ async function startRecognition(){
     // no-speech などは onend 側で自動的に聞き直す
   };
   recog.onend = ()=>{
+    clearTimeout(silenceTimer);
     state.recognizing=false;
     micBtn.classList.remove("rec");
     if(interimEl){ interimEl.remove(); interimEl=null; }
@@ -467,6 +479,7 @@ function startSession(){
 function stopSession(){
   state.session=false;
   discardNext=true;
+  clearTimeout(silenceTimer);
   try{ if(recog) recog.abort(); }catch(e){}
   speechSynthesis.cancel();
   state.recognizing=false;
