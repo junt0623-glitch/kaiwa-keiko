@@ -81,9 +81,16 @@ h1 small{font-family:var(--sans);font-size:.62rem;letter-spacing:.08em;opacity:.
 .show-ja .translation{display:block}
 .feedback{
   font-size:.78rem;background:#fdf3ef;border:1px solid #e8c9bf;color:#7c3a2b;
-  border-radius:10px;padding:8px 10px;margin-top:6px;
+  border-radius:10px;padding:8px 10px;margin-top:6px;white-space:pre-wrap;
 }
 .feedback::before{content:"✎ 添削メモ";display:block;font-weight:600;margin-bottom:2px;letter-spacing:.06em}
+.review{
+  font-size:.82rem;background:#eef4f1;border:1px solid var(--mist);color:var(--ink);
+  border-radius:10px;padding:10px 12px;margin:12px auto;max-width:92%;
+  line-height:1.7;white-space:pre-wrap;
+}
+.review::before{content:"📋 今日の稽古の講評";display:block;font-weight:600;margin-bottom:4px;
+  letter-spacing:.06em;color:var(--celadon-deep);font-family:var(--serif)}
 .msg-tools{display:flex;gap:10px;margin-top:4px}
 .msg-tools button{
   background:none;border:none;color:var(--gray);font-size:.72rem;cursor:pointer;padding:2px 0;
@@ -91,7 +98,7 @@ h1 small{font-family:var(--sans);font-size:.62rem;letter-spacing:.08em;opacity:.
 .msg-tools button:hover{color:var(--celadon-deep)}
 .sysnote{
   text-align:center;font-size:.75rem;color:var(--gray);
-  margin:10px auto;max-width:90%;line-height:1.5;
+  margin:10px auto;max-width:90%;line-height:1.5;white-space:pre-line;
 }
 .interim{opacity:.55;font-style:italic}
 
@@ -317,12 +324,38 @@ function loadVoices(){ voices = speechSynthesis.getVoices(); }
 loadVoices();
 if(typeof speechSynthesis!=="undefined") speechSynthesis.onvoiceschanged = loadVoices;
 
-function pickVoice(){
+/* 声の名前から性別を推定するヒント（Web Speech APIは性別情報を持たないため名前で判定）
+   注意: /male/ は "female" にも一致するので、必ず女性判定を先に行うこと */
+const FEMALE_HINT=/female|woman|girl|zira|aria|jenny|michelle|emma|samantha|victoria|karen|moira|tessa|fiona|allison|ava|serena|susan|kathy|shelley|nicky|joelle|xiaoxiao|xiaoyi|xiaohan|xiaomo|huihui|yaoyao|tingting|ting-ting|meijia|mei-jia|sinji|sin-ji|yu-shu|google us english|google 普通话/i;
+const MALE_HINT=/male|\bman\b|david|mark|guy|james|daniel|\balex\b|fred|oliver|thomas|arthur|aaron|christopher|eric|jacob|ryan|reed|rocko|eddy|yunxi|yunyang|yunjian|yunye|kangkang|li-mu|limu|binbin/i;
+
+let chosenVoice=null;  // 今回の会話で使う声。セッション開始・会話リセットごとにランダムに選び直す
+
+function candidateVoices(){
   const pref = LANG_CONF[state.lang].ttsLang;
   const exact = state.lang==="zh" ? ["zh-CN","zh_CN"] : ["en-US","en_US"];
-  return voices.find(v=>exact.some(t=>v.lang.replace("_","-")===t.replace("_","-")))
-      || voices.find(v=>v.lang.toLowerCase().startsWith(pref))
-      || null;
+  let list = voices.filter(v=>exact.some(t=>v.lang.replace("_","-")===t.replace("_","-")));
+  if(!list.length) list = voices.filter(v=>v.lang.toLowerCase().startsWith(pref));
+  return list;
+}
+function pickRandomVoice(){
+  const list=candidateVoices();
+  if(!list.length) return null;
+  const female=list.filter(v=>FEMALE_HINT.test(v.name));
+  const male=list.filter(v=>!FEMALE_HINT.test(v.name) && MALE_HINT.test(v.name));
+  // 男女両方の声が見つかれば五分五分でどちらかの性別を選ぶ。
+  // 判別できない環境では言語一致の全候補からランダムに選ぶ
+  const pool = (female.length && male.length) ? (Math.random()<0.5?female:male) : list;
+  return pool[Math.floor(Math.random()*pool.length)];
+}
+function pickVoice(){
+  const pref = LANG_CONF[state.lang].ttsLang;
+  // 選択済みの声が現在の言語で使えるならそのまま使う（会話の途中で声が変わらないように）
+  if(chosenVoice && chosenVoice.lang.toLowerCase().startsWith(pref) && voices.includes(chosenVoice)){
+    return chosenVoice;
+  }
+  chosenVoice=pickRandomVoice();
+  return chosenVoice;
 }
 function speak(text, onDone){
   if(typeof speechSynthesis==="undefined"){ if(onDone) onDone(); return; }
@@ -396,6 +429,13 @@ async function startRecognition(){
     if(discardNext){ discardNext=false; return; }
     if(t){ handleUserUtterance(t); return; }
     if(state.session){
+      // 無応答が一定時間続いたら稽古を終えて講評へ
+      if(Date.now()-silenceSince > SILENCE_LIMIT_MS){
+        addNote("しばらく応答がなかったため、稽古を終了します。");
+        stopSession();
+        giveSessionReview();
+        return;
+      }
       // 無音などで終了 → ハンズフリー継続中は自動で聞き直す
       setTimeout(listenIfIdle, 400);
     }else{
@@ -407,14 +447,21 @@ async function startRecognition(){
 
 /* ---- ハンズフリー・セッション ---- */
 let discardNext=false;
+const SILENCE_LIMIT_MS=30000;   // 約30秒答えがなければ稽古を終了して講評へ
+let silenceSince=Date.now();    // ユーザーの応答待ちを始めた時刻
 
 function listenIfIdle(){
   if(state.session && !state.recognizing && !state.busy) startRecognition();
 }
 function startSession(){
   state.session=true;
+  silenceSince=Date.now();
+  discardNext=false;   // 前回の停止時に残った破棄フラグで初回の発話が消えないように
   micBtn.classList.add("session");
-  addNote("ハンズフリー開始：読み上げが終わると自動でマイクがオンになります。⏹（同じボタン）で終了。");
+  chosenVoice=null;                 // セッションごとに相手の声をランダムに選び直す
+  const v=pickVoice();
+  addNote("ハンズフリー開始：読み上げが終わると自動でマイクがオンになります。⏹（同じボタン）で終了。"
+    + (v ? `\n今回の相手の声: ${v.name}` : ""));
   listenIfIdle();
 }
 function stopSession(){
@@ -428,7 +475,12 @@ function stopSession(){
   micStatus.textContent="🎤 を押して稽古を始めましょう";
 }
 function toggleSession(){
-  if(state.session) stopSession(); else startSession();
+  if(state.session){
+    stopSession();
+    giveSessionReview();   // 停止ボタンで終えたときは会話全体の講評を出す
+  }else{
+    startSession();
+  }
 }
 
 /* ========== AI呼び出し ========== */
@@ -456,7 +508,7 @@ Respond ONLY with a JSON object, no markdown fences, with these keys:
 }`;
 }
 
-async function callClaude(messages){
+async function callClaude(messages, sys){
   const headers={"Content-Type":"application/json"};
   if(state.apiKey){
     headers["x-api-key"]=state.apiKey;
@@ -468,7 +520,7 @@ async function callClaude(messages){
     body:JSON.stringify({
       model:"claude-sonnet-4-6",
       max_tokens:1000,
-      system:systemPrompt(),
+      system:sys||systemPrompt(),
       messages
     })
   });
@@ -504,7 +556,7 @@ async function detectGeminiModel(){
 
 let thinkCfgSupported = true; // 思考オフ設定が使えないモデルでは自動的に外す
 
-async function callGemini(messages, isRetry){
+async function callGemini(messages, isRetry, sys){
   if(!state.apiKey) throw new Error("Gemini APIキーが未設定です（⚙API設定から入力してください）");
   if(!geminiModel){
     geminiModel=await detectGeminiModel();
@@ -512,25 +564,25 @@ async function callGemini(messages, isRetry){
     addNote("使用モデル: "+geminiModel);
   }
   const contents=messages.map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.content}]}));
-  const genCfg={responseMimeType:"application/json",maxOutputTokens:512};
+  const genCfg={responseMimeType:"application/json",maxOutputTokens:1024};
   if(thinkCfgSupported) genCfg.thinkingConfig={thinkingBudget:0}; // 「思考」をオフにして高速化
   const res=await fetch(
     "https://generativelanguage.googleapis.com/v1beta/models/"+geminiModel+":generateContent?key="+encodeURIComponent(state.apiKey),
     {method:"POST",headers:{"Content-Type":"application/json"},
      body:JSON.stringify({
-       systemInstruction:{parts:[{text:systemPrompt()}]},
+       systemInstruction:{parts:[{text:sys||systemPrompt()}]},
        contents,
        generationConfig:genCfg
      })});
   if(res.status===400 && thinkCfgSupported){
     // このモデルは thinkingConfig 非対応 → 外して再試行
     thinkCfgSupported=false;
-    return callGemini(messages, isRetry);
+    return callGemini(messages, isRetry, sys);
   }
   if(res.status===404 && !isRetry){
     // モデルが廃止された場合：キャッシュを捨てて再検出し、1回だけ再試行
     geminiModel=null; store.set("kk_gemini_model2","");
-    return callGemini(messages, true);
+    return callGemini(messages, true, sys);
   }
   if(res.status===429) throw new Error("Gemini APIの無料枠の上限に達しました（1分あたり/1日あたりの制限）。少し待ってからお試しください。");
   if(!res.ok) throw new Error("Gemini API "+res.status);
@@ -591,9 +643,10 @@ async function handleUserUtterance(text){
       feedback: r.feedback||null
     });
     state.busy=false;
+    silenceSince=Date.now();   // ここからユーザーの応答待ちを計り直す
     if($("opt-autospeak").checked){
       if(state.session) micStatus.textContent="読み上げ中…（終わると自動でマイクがオンになります）";
-      speak(r.reply, ()=>setTimeout(listenIfIdle, 300));
+      speak(r.reply, ()=>{ silenceSince=Date.now(); setTimeout(listenIfIdle, 300); });
     }else{
       setTimeout(listenIfIdle, 300);
     }
@@ -609,10 +662,53 @@ async function handleUserUtterance(text){
   }
 }
 
+/* ========== 会話終了後の講評（駄目出し・正しい指導） ========== */
+function reviewPrompt(){
+  const c=LANG_CONF[state.lang];
+  return `You are a strict but encouraging ${c.aiName} teacher. Below is the transcript of a finished practice conversation between a Japanese learner (学習者) and an AI tutor (先生).
+Review ONLY the learner's utterances:
+- Point out mistakes and unnatural expressions clearly (駄目出し), quoting the learner's words.
+- For each, give the correct or more natural phrasing in ${c.aiName}${state.lang==="zh"?" with pinyin":""}.
+- Add one or two good points, and brief advice for next practice.
+- If there were no mistakes, say so and suggest one more advanced phrasing instead.
+Write everything IN JAPANESE (quoted example sentences stay in ${c.aiName}). Use short bullet lines starting with "・".
+Respond ONLY with a JSON object, no markdown fences: {"review":"the review text"}`;
+}
+function addReview(text){
+  const d=document.createElement("div");
+  d.className="review";
+  d.textContent=text;
+  chat.appendChild(d);scroll();
+}
+async function giveSessionReview(){
+  // 学習者の発話が無ければ講評する材料が無いので何もしない
+  if(state.busy || !state.history.some(m=>m.role==="user")) return;
+  state.busy=true;
+  const thinking=addNote("…稽古全体の講評をまとめています…");
+  try{
+    const transcript=state.history.slice(-24)
+      .map(m=>(m.role==="user"?"学習者: ":"先生: ")+m.content).join("\n");
+    const msgs=[{role:"user",content:transcript}];
+    const raw = state.provider==="gemini"
+      ? await callGemini(msgs, false, reviewPrompt())
+      : await callClaude(msgs, reviewPrompt());
+    const r=parseAI(raw);
+    thinking.remove();
+    addReview(r.review || r.reply || String(raw));
+  }catch(err){
+    thinking.remove();
+    addNote("⚠ 講評の取得に失敗しました：" + err.message);
+  }finally{
+    state.busy=false;
+    listenIfIdle();   // 講評中に🎤が押されていた場合に備えて再開を試みる
+  }
+}
+
 /* ========== 会話の開始・リセット ========== */
 function resetConversation(greetNote){
   stopSession();
   state.history=[];
+  chosenVoice=null;   // 新しい会話では声を選び直す
   chat.innerHTML="";
   const c=LANG_CONF[state.lang];
   addNote(`${c.name}・${$("scenario").selectedOptions[0].textContent}（${$("level").selectedOptions[0].textContent}）で稽古を始めます。${greetNote||"🎤 を押すとハンズフリー会話が始まります。"}`);
