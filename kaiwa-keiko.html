@@ -428,7 +428,7 @@ async function callClaude(messages){
   return (data.content||[]).map(b=>b.text||"").join("");
 }
 
-let geminiModel = store.get("kk_gemini_model") || null;
+let geminiModel = store.get("kk_gemini_model2") || null;
 
 async function detectGeminiModel(){
   const res=await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key="+encodeURIComponent(state.apiKey));
@@ -439,11 +439,12 @@ async function detectGeminiModel(){
     .map(m=>(m.name||"").replace(/^models\//,""))
     .filter(n=>!/(image|tts|live|audio|video|embed|veo|imagen|robotics|gemma|nano)/i.test(n));
   const prefs=[
-    /^gemini-flash-latest$/,          // 常に最新Flashを指すエイリアス
-    /^gemini-\d[\d.]*-flash$/,        // 安定版Flash（例: gemini-3-flash）
-    /^gemini-flash-lite-latest$/,
-    /^gemini-\d[\d.]*-flash-lite/,    // Flash-Lite系
-    /flash/, /gemini/                 // 最後の砦
+    /^gemini-flash-lite-latest$/,      // 高速版Flash-Liteを最優先（会話向き）
+    /^gemini-\d[\d.]*-flash-lite$/,
+    /flash-lite/,
+    /^gemini-flash-latest$/,
+    /^gemini-\d[\d.]*-flash$/,
+    /flash/, /gemini/                  // 最後の砦
   ];
   for(const p of prefs){
     const hit=names.find(n=>p.test(n));
@@ -452,25 +453,34 @@ async function detectGeminiModel(){
   throw new Error("このキーで使えるGeminiモデルが見つかりませんでした。");
 }
 
+let thinkCfgSupported = true; // 思考オフ設定が使えないモデルでは自動的に外す
+
 async function callGemini(messages, isRetry){
   if(!state.apiKey) throw new Error("Gemini APIキーが未設定です（⚙API設定から入力してください）");
   if(!geminiModel){
     geminiModel=await detectGeminiModel();
-    store.set("kk_gemini_model",geminiModel);
+    store.set("kk_gemini_model2",geminiModel);
     addNote("使用モデル: "+geminiModel);
   }
   const contents=messages.map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.content}]}));
+  const genCfg={responseMimeType:"application/json",maxOutputTokens:512};
+  if(thinkCfgSupported) genCfg.thinkingConfig={thinkingBudget:0}; // 「思考」をオフにして高速化
   const res=await fetch(
     "https://generativelanguage.googleapis.com/v1beta/models/"+geminiModel+":generateContent?key="+encodeURIComponent(state.apiKey),
     {method:"POST",headers:{"Content-Type":"application/json"},
      body:JSON.stringify({
        systemInstruction:{parts:[{text:systemPrompt()}]},
        contents,
-       generationConfig:{responseMimeType:"application/json"}
+       generationConfig:genCfg
      })});
+  if(res.status===400 && thinkCfgSupported){
+    // このモデルは thinkingConfig 非対応 → 外して再試行
+    thinkCfgSupported=false;
+    return callGemini(messages, isRetry);
+  }
   if(res.status===404 && !isRetry){
     // モデルが廃止された場合：キャッシュを捨てて再検出し、1回だけ再試行
-    geminiModel=null; store.set("kk_gemini_model","");
+    geminiModel=null; store.set("kk_gemini_model2","");
     return callGemini(messages, true);
   }
   if(res.status===429) throw new Error("Gemini APIの無料枠の上限に達しました（1分あたり/1日あたりの制限）。少し待ってからお試しください。");
@@ -479,12 +489,36 @@ async function callGemini(messages, isRetry){
   return data.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("") || "";
 }
 
+function extractJSON(s){
+  // 最初の { から対応する } までを括弧の深さで正確に切り出す（末尾のゴミに強い）
+  const start=s.indexOf("{");
+  if(start<0) return null;
+  let depth=0,inStr=false,esc=false;
+  for(let i=start;i<s.length;i++){
+    const ch=s[i];
+    if(inStr){
+      if(esc) esc=false;
+      else if(ch==="\\") esc=true;
+      else if(ch==='"') inStr=false;
+    }else{
+      if(ch==='"') inStr=true;
+      else if(ch==="{") depth++;
+      else if(ch==="}"){
+        depth--;
+        if(depth===0){
+          try{ return JSON.parse(s.slice(start,i+1)); }catch(e){ return null; }
+        }
+      }
+    }
+  }
+  return null;
+}
 function parseAI(raw){
   const clean=raw.replace(/```json|```/g,"").trim();
   try{ return JSON.parse(clean); }
   catch(e){
-    const m=clean.match(/\{[\s\S]*\}/);
-    if(m){ try{ return JSON.parse(m[0]); }catch(_){} }
+    const j=extractJSON(clean);
+    if(j) return j;
     return { reply: clean, reading:null, translation:null, feedback:null };
   }
 }
@@ -496,7 +530,7 @@ async function handleUserUtterance(text){
   state.history.push({role:"user",content:text});
   const thinking=addNote("…考え中…");
   try{
-    const msgs=state.history.slice(-12);
+    const msgs=state.history.slice(-8);  // 送信履歴を絞って応答を高速化
     const raw = state.provider==="gemini" ? await callGemini(msgs) : await callClaude(msgs);
     const r=parseAI(raw);
     thinking.remove();
@@ -569,7 +603,7 @@ $("btn-save").addEventListener("click",()=>{
   state.provider=document.querySelector('input[name=provider]:checked').value;
   store.set("kk_key",state.apiKey);
   store.set("kk_provider",state.provider);
-  geminiModel=null; store.set("kk_gemini_model","");  // キー変更時はモデルを再検出
+  geminiModel=null; store.set("kk_gemini_model2","");  // キー変更時はモデルを再検出
   $("overlay").classList.remove("open");
   addNote("設定を保存しました（"+(state.provider==="claude"?"Claude":"Gemini")+"）");
 });
