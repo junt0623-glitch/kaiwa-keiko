@@ -428,17 +428,52 @@ async function callClaude(messages){
   return (data.content||[]).map(b=>b.text||"").join("");
 }
 
-async function callGemini(messages){
+let geminiModel = store.get("kk_gemini_model") || null;
+
+async function detectGeminiModel(){
+  const res=await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key="+encodeURIComponent(state.apiKey));
+  if(!res.ok) throw new Error("Gemini モデル一覧の取得に失敗（"+res.status+"）。キーが正しいかご確認ください。");
+  const data=await res.json();
+  const names=(data.models||[])
+    .filter(m=>((m.supportedGenerationMethods||m.supportedActions||[]).includes("generateContent")))
+    .map(m=>(m.name||"").replace(/^models\//,""))
+    .filter(n=>!/(image|tts|live|audio|video|embed|veo|imagen|robotics|gemma|nano)/i.test(n));
+  const prefs=[
+    /^gemini-flash-latest$/,          // 常に最新Flashを指すエイリアス
+    /^gemini-\d[\d.]*-flash$/,        // 安定版Flash（例: gemini-3-flash）
+    /^gemini-flash-lite-latest$/,
+    /^gemini-\d[\d.]*-flash-lite/,    // Flash-Lite系
+    /flash/, /gemini/                 // 最後の砦
+  ];
+  for(const p of prefs){
+    const hit=names.find(n=>p.test(n));
+    if(hit) return hit;
+  }
+  throw new Error("このキーで使えるGeminiモデルが見つかりませんでした。");
+}
+
+async function callGemini(messages, isRetry){
   if(!state.apiKey) throw new Error("Gemini APIキーが未設定です（⚙API設定から入力してください）");
+  if(!geminiModel){
+    geminiModel=await detectGeminiModel();
+    store.set("kk_gemini_model",geminiModel);
+    addNote("使用モデル: "+geminiModel);
+  }
   const contents=messages.map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.content}]}));
   const res=await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+encodeURIComponent(state.apiKey),
+    "https://generativelanguage.googleapis.com/v1beta/models/"+geminiModel+":generateContent?key="+encodeURIComponent(state.apiKey),
     {method:"POST",headers:{"Content-Type":"application/json"},
      body:JSON.stringify({
        systemInstruction:{parts:[{text:systemPrompt()}]},
        contents,
        generationConfig:{responseMimeType:"application/json"}
      })});
+  if(res.status===404 && !isRetry){
+    // モデルが廃止された場合：キャッシュを捨てて再検出し、1回だけ再試行
+    geminiModel=null; store.set("kk_gemini_model","");
+    return callGemini(messages, true);
+  }
+  if(res.status===429) throw new Error("Gemini APIの無料枠の上限に達しました（1分あたり/1日あたりの制限）。少し待ってからお試しください。");
   if(!res.ok) throw new Error("Gemini API "+res.status);
   const data=await res.json();
   return data.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("") || "";
@@ -474,7 +509,11 @@ async function handleUserUtterance(text){
     if($("opt-autospeak").checked) speak(r.reply);
   }catch(err){
     thinking.remove();
-    addNote("⚠ "+err.message);
+    if(err instanceof TypeError || /Failed to fetch/i.test(err.message)){
+      addNote("⚠ AIに接続できませんでした。原因の多くはAPIキー未設定です。右上の「⚙API設定」からClaudeまたはGeminiのAPIキーを入力・保存して、もう一度お試しください。（ネット接続もご確認ください）");
+    }else{
+      addNote("⚠ "+err.message);
+    }
   }finally{
     state.busy=false;
   }
@@ -530,6 +569,7 @@ $("btn-save").addEventListener("click",()=>{
   state.provider=document.querySelector('input[name=provider]:checked').value;
   store.set("kk_key",state.apiKey);
   store.set("kk_provider",state.provider);
+  geminiModel=null; store.set("kk_gemini_model","");  // キー変更時はモデルを再検出
   $("overlay").classList.remove("open");
   addNote("設定を保存しました（"+(state.provider==="claude"?"Claude":"Gemini")+"）");
 });
@@ -539,6 +579,9 @@ $("overlay").addEventListener("click",e=>{ if(e.target.id==="overlay") $("overla
 resetConversation(
   SR ? undefined : "※ このブラウザは音声認識に未対応のため、キーボード入力で練習できます（読み上げは可能です）。"
 );
+if(!state.apiKey){
+  addNote("※ APIキーが未設定です。GitHub Pagesやローカルで使う場合は、右上の「⚙API設定」からキーを入力してください（claude.ai内のプレビューではキー無しでも動きます）。");
+}
 </script>
 </body>
 </html>
