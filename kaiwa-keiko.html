@@ -115,6 +115,10 @@ footer{
   background:radial-gradient(circle at 38% 32%, #d4674f, var(--cinnabar));
   box-shadow:0 3px 10px rgba(182,67,47,.4);
 }
+#btn-mic.session:not(.rec){
+  border-color:var(--celadon);
+  box-shadow:0 0 0 4px rgba(93,133,119,.25),0 3px 10px rgba(61,99,85,.35);
+}
 #btn-mic.rec::before,#btn-mic.rec::after{
   content:"";position:absolute;inset:-2px;border-radius:50%;
   border:2px solid var(--cinnabar);opacity:0;
@@ -200,7 +204,7 @@ footer{
   <div class="foot-row">
     <button id="btn-mic" aria-label="話す（押して録音開始）">🎤</button>
     <div class="foot-side">
-      <div id="mic-status">🎤 を押して話しかけてください</div>
+      <div id="mic-status">🎤 を押して稽古を始めましょう</div>
       <div class="text-row">
         <textarea id="text-input" placeholder="キーボード入力もできます" rows="1"></textarea>
         <button id="btn-send">送信</button>
@@ -250,7 +254,8 @@ const state = {
   provider: store.get("kk_provider") || "claude",
   apiKey: store.get("kk_key") || "",
   busy: false,
-  recognizing: false
+  recognizing: false,
+  session: false
 };
 
 const LANG_CONF = {
@@ -319,28 +324,38 @@ function pickVoice(){
       || voices.find(v=>v.lang.toLowerCase().startsWith(pref))
       || null;
 }
-function speak(text){
-  if(typeof speechSynthesis==="undefined") return;
+function speak(text, onDone){
+  if(typeof speechSynthesis==="undefined"){ if(onDone) onDone(); return; }
   speechSynthesis.cancel();
   const u=new SpeechSynthesisUtterance(text);
   const v=pickVoice();
   if(v) u.voice=v;
   u.lang = LANG_CONF[state.lang].sttLang;
   u.rate = parseFloat($("rate").value);
+  if(onDone){ u.onend=onDone; u.onerror=onDone; }
   speechSynthesis.speak(u);
 }
 
 /* ========== 音声認識 ========== */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recog=null, interimEl=null;
+let recog=null, interimEl=null, micStream=null;
 
-function startRecognition(){
+async function ensureMicPermission(){
+  // マイクを一度取得して保持し続けることで、セッション中の再許可ダイアログを防ぐ
+  if(micStream && micStream.active) return;
+  try{
+    micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch(e){ /* 拒否された場合はSpeechRecognition側のエラーで案内する */ }
+}
+
+async function startRecognition(){
   if(!SR){
     micStatus.textContent="このブラウザは音声認識に未対応です（キーボード入力をご利用ください）";
     return;
   }
-  if(state.recognizing){ recog.stop(); return; }
+  if(state.recognizing) return;
   speechSynthesis.cancel();
+  await ensureMicPermission();
   recog = new SR();
   recog.lang = LANG_CONF[state.lang].sttLang;
   recog.interimResults = true;
@@ -350,6 +365,7 @@ function startRecognition(){
   recog.onstart = ()=>{
     state.recognizing=true;
     micBtn.classList.add("rec");
+    micBtn.textContent="🎤";
     micStatus.textContent = `聞き取り中…（${LANG_CONF[state.lang].name}で話してください）`;
     interimEl = addMsg("user","…");
     interimEl.querySelector(".bubble").classList.add("interim");
@@ -363,23 +379,56 @@ function startRecognition(){
     if(interimEl) interimEl.querySelector(".bubble").textContent = finalText + interim || "…";
   };
   recog.onerror = e=>{
-    state.recognizing=false;
-    micBtn.classList.remove("rec");
-    if(interimEl){ interimEl.remove(); interimEl=null; }
-    const msgs={"not-allowed":"マイクの使用が許可されていません。ブラウザの設定をご確認ください。",
-                "no-speech":"音声が検出できませんでした。もう一度お試しください。",
-                "network":"音声認識サーバーに接続できません（ネット接続が必要です）。"};
-    micStatus.textContent = msgs[e.error] || "音声認識エラー: "+e.error;
+    if(e.error==="not-allowed" || e.error==="service-not-allowed"){
+      stopSession();
+      micStatus.textContent="マイクの使用が許可されていません。ブラウザの設定をご確認ください。";
+    }else if(e.error==="network"){
+      stopSession();
+      micStatus.textContent="音声認識サーバーに接続できません（ネット接続が必要です）。";
+    }
+    // no-speech などは onend 側で自動的に聞き直す
   };
   recog.onend = ()=>{
     state.recognizing=false;
     micBtn.classList.remove("rec");
-    micStatus.textContent="🎤 を押して話しかけてください";
     if(interimEl){ interimEl.remove(); interimEl=null; }
     const t=finalText.trim();
-    if(t) handleUserUtterance(t);
+    if(discardNext){ discardNext=false; return; }
+    if(t){ handleUserUtterance(t); return; }
+    if(state.session){
+      // 無音などで終了 → ハンズフリー継続中は自動で聞き直す
+      setTimeout(listenIfIdle, 400);
+    }else{
+      micStatus.textContent="🎤 を押して稽古を始めましょう";
+    }
   };
   recog.start();
+}
+
+/* ---- ハンズフリー・セッション ---- */
+let discardNext=false;
+
+function listenIfIdle(){
+  if(state.session && !state.recognizing && !state.busy) startRecognition();
+}
+function startSession(){
+  state.session=true;
+  micBtn.classList.add("session");
+  addNote("ハンズフリー開始：読み上げが終わると自動でマイクがオンになります。⏹（同じボタン）で終了。");
+  listenIfIdle();
+}
+function stopSession(){
+  state.session=false;
+  discardNext=true;
+  try{ if(recog) recog.abort(); }catch(e){}
+  speechSynthesis.cancel();
+  state.recognizing=false;
+  micBtn.classList.remove("rec","session");
+  micBtn.textContent="🎤";
+  micStatus.textContent="🎤 を押して稽古を始めましょう";
+}
+function toggleSession(){
+  if(state.session) stopSession(); else startSession();
 }
 
 /* ========== AI呼び出し ========== */
@@ -526,6 +575,7 @@ function parseAI(raw){
 async function handleUserUtterance(text){
   if(state.busy) return;
   state.busy=true;
+  if(state.session){ micBtn.textContent="⏹"; micStatus.textContent="考え中…"; }
   addMsg("user",text);
   state.history.push({role:"user",content:text});
   const thinking=addNote("…考え中…");
@@ -540,30 +590,36 @@ async function handleUserUtterance(text){
       translation: r.translation||null,
       feedback: r.feedback||null
     });
-    if($("opt-autospeak").checked) speak(r.reply);
+    state.busy=false;
+    if($("opt-autospeak").checked){
+      if(state.session) micStatus.textContent="読み上げ中…（終わると自動でマイクがオンになります）";
+      speak(r.reply, ()=>setTimeout(listenIfIdle, 300));
+    }else{
+      setTimeout(listenIfIdle, 300);
+    }
   }catch(err){
     thinking.remove();
+    state.busy=false;
+    stopSession();  // エラー時は無限ループ防止のためハンズフリーを停止
     if(err instanceof TypeError || /Failed to fetch/i.test(err.message)){
       addNote("⚠ AIに接続できませんでした。原因の多くはAPIキー未設定です。右上の「⚙API設定」からClaudeまたはGeminiのAPIキーを入力・保存して、もう一度お試しください。（ネット接続もご確認ください）");
     }else{
       addNote("⚠ "+err.message);
     }
-  }finally{
-    state.busy=false;
   }
 }
 
 /* ========== 会話の開始・リセット ========== */
 function resetConversation(greetNote){
-  speechSynthesis.cancel();
+  stopSession();
   state.history=[];
   chat.innerHTML="";
   const c=LANG_CONF[state.lang];
-  addNote(`${c.name}・${$("scenario").selectedOptions[0].textContent}（${$("level").selectedOptions[0].textContent}）で稽古を始めます。${greetNote||"🎤 を押して挨拶から話しかけてみましょう。"}`);
+  addNote(`${c.name}・${$("scenario").selectedOptions[0].textContent}（${$("level").selectedOptions[0].textContent}）で稽古を始めます。${greetNote||"🎤 を押すとハンズフリー会話が始まります。"}`);
 }
 
 /* ========== イベント ========== */
-micBtn.addEventListener("click", startRecognition);
+micBtn.addEventListener("click", toggleSession);
 
 $("btn-send").addEventListener("click", ()=>{
   const t=$("text-input").value.trim();
