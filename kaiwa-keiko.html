@@ -397,7 +397,7 @@ async function startRecognition(){
   recog.lang = LANG_CONF[state.lang].sttLang;
   recog.interimResults = true;
   recog.continuous = false;
-  let finalText="";
+  let finalText="", latestText="";
 
   recog.onstart = ()=>{
     state.recognizing=true;
@@ -413,6 +413,7 @@ async function startRecognition(){
       if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
       else interim += e.results[i][0].transcript;
     }
+    latestText = (finalText + interim).trim();
     if(interimEl) interimEl.querySelector(".bubble").textContent = finalText + interim || "…";
     // 発話のたびにタイマーをリセット。話し終えて無音がSPEECH_PAUSE_MS続いたら
     // ブラウザの無音判定を待たずに自分から聞き取りを打ち切り、すぐ応答へ進める
@@ -437,7 +438,9 @@ async function startRecognition(){
     state.recognizing=false;
     micBtn.classList.remove("rec");
     if(interimEl){ interimEl.remove(); interimEl=null; }
-    const t=finalText.trim();
+    // stop()で打ち切った場合、最終確定結果（isFinal）が届かないことがあるため、
+    // 直近の中間結果（latestText）をフォールバックとして使う
+    const t=(finalText.trim() || latestText);
     if(discardNext){ discardNext=false; return; }
     if(t){ handleUserUtterance(t); return; }
     if(state.session){
