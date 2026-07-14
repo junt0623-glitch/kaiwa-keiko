@@ -534,7 +534,7 @@ Respond ONLY with a JSON object, no markdown fences, with these keys:
 }`;
 }
 
-async function callClaude(messages, sys){
+async function callClaude(messages, sys, maxTokens){
   const headers={"Content-Type":"application/json"};
   if(state.apiKey){
     headers["x-api-key"]=state.apiKey;
@@ -545,7 +545,7 @@ async function callClaude(messages, sys){
     method:"POST",headers,
     body:JSON.stringify({
       model:"claude-sonnet-4-6",
-      max_tokens:1000,
+      max_tokens:maxTokens||1000,
       system:sys||systemPrompt(),
       messages
     })
@@ -582,7 +582,7 @@ async function detectGeminiModel(){
 
 let thinkCfgSupported = true; // 思考オフ設定が使えないモデルでは自動的に外す
 
-async function callGemini(messages, isRetry, sys){
+async function callGemini(messages, isRetry, sys, maxTokens){
   if(!state.apiKey) throw new Error("Gemini APIキーが未設定です（⚙API設定から入力してください）");
   if(!geminiModel){
     geminiModel=await detectGeminiModel();
@@ -590,7 +590,7 @@ async function callGemini(messages, isRetry, sys){
     addNote("使用モデル: "+geminiModel);
   }
   const contents=messages.map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.content}]}));
-  const genCfg={responseMimeType:"application/json",maxOutputTokens:1024};
+  const genCfg={responseMimeType:"application/json",maxOutputTokens:maxTokens||1024};
   if(thinkCfgSupported) genCfg.thinkingConfig={thinkingBudget:0}; // 「思考」をオフにして高速化
   const res=await fetch(
     "https://generativelanguage.googleapis.com/v1beta/models/"+geminiModel+":generateContent?key="+encodeURIComponent(state.apiKey),
@@ -603,12 +603,12 @@ async function callGemini(messages, isRetry, sys){
   if(res.status===400 && thinkCfgSupported){
     // このモデルは thinkingConfig 非対応 → 外して再試行
     thinkCfgSupported=false;
-    return callGemini(messages, isRetry, sys);
+    return callGemini(messages, isRetry, sys, maxTokens);
   }
   if(res.status===404 && !isRetry){
     // モデルが廃止された場合：キャッシュを捨てて再検出し、1回だけ再試行
     geminiModel=null; store.set("kk_gemini_model2","");
-    return callGemini(messages, true, sys);
+    return callGemini(messages, true, sys, maxTokens);
   }
   if(res.status===429) throw new Error("Gemini APIの無料枠の上限に達しました（1分あたり/1日あたりの制限）。少し待ってからお試しください。");
   if(!res.ok) throw new Error("Gemini API "+res.status);
@@ -691,7 +691,16 @@ async function handleUserUtterance(text){
 /* ========== 会話終了後の講評（駄目出し・正しい指導） ========== */
 function reviewPrompt(){
   const c=LANG_CONF[state.lang];
+  const level=$("level").value;
+  // 初級では、間違いの「理由」を文法用語をかみ砕いて丁寧に解説する。
+  // 中級・上級では要点を簡潔にまとめる。
+  const levelStyle = level==="beginner"
+    ? `The learner is a BEGINNER. For each point, explain clearly and gently IN JAPANESE why it is wrong, using basic grammar in plain words (e.g. 過去形・複数形・語順・助詞にあたる部分など). Give a short, easy example sentence they can reuse. Keep sentences short and encouraging. Avoid difficult grammar jargon; when you must use a term, add a one-line plain explanation.`
+    : level==="advanced"
+    ? `The learner is ADVANCED. Be concise and focus on nuance, naturalness, and register.`
+    : `The learner is INTERMEDIATE. Explain briefly but clearly why each phrasing is better.`;
   return `You are a strict but encouraging ${c.aiName} teacher. Below is the transcript of a finished practice conversation between a Japanese learner (学習者) and an AI tutor (先生).
+${levelStyle}
 Review ONLY the learner's utterances:
 - Point out mistakes and unnatural expressions clearly (駄目出し), quoting the learner's words.
 - For each, give the correct or more natural phrasing in ${c.aiName}${state.lang==="zh"?" with pinyin":""}.
@@ -715,9 +724,11 @@ async function giveSessionReview(){
     const transcript=state.history.slice(-24)
       .map(m=>(m.role==="user"?"学習者: ":"先生: ")+m.content).join("\n");
     const msgs=[{role:"user",content:transcript}];
+    // 初級は解説が長くなるため、講評は出力トークンを広めに確保する
+    const reviewTokens = $("level").value==="beginner" ? 2048 : 1500;
     const raw = state.provider==="gemini"
-      ? await callGemini(msgs, false, reviewPrompt())
-      : await callClaude(msgs, reviewPrompt());
+      ? await callGemini(msgs, false, reviewPrompt(), reviewTokens)
+      : await callClaude(msgs, reviewPrompt(), reviewTokens);
     const r=parseAI(raw);
     thinking.remove();
     addReview(r.review || r.reply || String(raw));
