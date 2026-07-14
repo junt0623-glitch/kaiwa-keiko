@@ -330,6 +330,8 @@ const FEMALE_HINT=/female|woman|girl|zira|aria|jenny|michelle|emma|samantha|vict
 const MALE_HINT=/male|\bman\b|david|mark|guy|james|daniel|\balex\b|fred|oliver|thomas|arthur|aaron|christopher|eric|jacob|ryan|reed|rocko|eddy|yunxi|yunyang|yunjian|yunye|kangkang|li-mu|limu|binbin/i;
 
 let chosenVoice=null;  // 今回の会話で使う声。セッション開始・会話リセットごとにランダムに選び直す
+let sessionPitch=1.0;  // 話者ごとの声の高さ。声を選び直すたびに少しばらつかせて別人らしくする
+function newSessionPitch(){ sessionPitch = 0.9 + Math.random()*0.3; }  // 0.9〜1.2
 
 function candidateVoices(){
   const pref = LANG_CONF[state.lang].ttsLang;
@@ -364,7 +366,11 @@ function speak(text, onDone){
   const v=pickVoice();
   if(v) u.voice=v;
   u.lang = LANG_CONF[state.lang].sttLang;
-  u.rate = parseFloat($("rate").value);
+  const baseRate=parseFloat($("rate").value);
+  // 一本調子を避けて人間らしくするため、話者ごとの声の高さ（sessionPitch）を土台に、
+  // 一言ごとにピッチと速度をごくわずかに揺らす（大げさにならない範囲で）
+  u.pitch = Math.max(0.5, Math.min(1.6, sessionPitch + (Math.random()-0.5)*0.12));
+  u.rate  = Math.max(0.5, baseRate + (Math.random()-0.5)*0.06);
   if(onDone){ u.onend=onDone; u.onerror=onDone; }
   speechSynthesis.speak(u);
 }
@@ -484,6 +490,7 @@ function startSession(){
   discardNext=false;   // 前回の停止時に残った破棄フラグで初回の発話が消えないように
   micBtn.classList.add("session");
   chosenVoice=null;                 // セッションごとに相手の声をランダムに選び直す
+  newSessionPitch();                // 声の高さも選び直して別人らしさを出す
   const v=pickVoice();
   addNote("ハンズフリー開始：読み上げが終わると自動でマイクがオンになります。⏹（同じボタン）で終了。"
     + (v ? `\n今回の相手の声: ${v.name}` : ""));
@@ -518,13 +525,18 @@ function systemPrompt(){
     intermediate:"Use natural everyday language (B1-B2).",
     advanced:"Use natural, sophisticated language including idioms and domain vocabulary (C1)."
   }[level];
-  return `You are a friendly ${c.aiName} conversation tutor for a Japanese learner.
+  return `You are a warm, real human having a relaxed ${c.aiName} conversation with a Japanese friend who is practicing. You are NOT a robot or a formal tutor — talk like a real person chatting.
 Scenario: ${SCENARIOS[$("scenario").value]}
 Level: ${levelDesc}
+How to sound human (very important):
+- React naturally first before replying: use short interjections and fillers that fit ${c.aiName} (e.g. in English "Oh!", "Really?", "Haha", "Hmm", "Right", "I know!"; in Mandarin "诶", "哇", "对对对", "嗯", "哈哈", "真的吗"). Show feeling.
+- Use everyday spoken style: contractions, casual phrasing, and natural rhythm. Vary sentence length; sometimes just a few words.
+- Share a little about "yourself" — small opinions, reactions, tiny bits of experience — so it feels two-sided, not an interview.
+- Do NOT end every turn with a question. Often just react or comment. Ask a question only when it feels natural, and vary how you ask. Never sound like a checklist.
+- Match the learner's energy and topic. Don't lecture.
 Rules:
-- Reply ONLY in ${c.aiName}. Keep replies to 1-3 sentences so the learner can respond.
-- Always end with a question or a natural prompt for the learner to continue, unless saying goodbye.
-- Gently correct the learner's mistakes when needed.
+- Reply ONLY in ${c.aiName}. Keep it short and speakable: usually 1-2 sentences so the learner can jump back in.
+- If the learner makes a mistake, don't interrupt the flow to correct it in the reply; put corrections in "feedback" instead. Only rephrase naturally in-line if it feels like something a friend would gently echo back.
 Respond ONLY with a JSON object, no markdown fences, with these keys:
 {
  "reply": "your reply in ${c.aiName}",
@@ -746,6 +758,7 @@ function resetConversation(greetNote){
   stopSession();
   state.history=[];
   chosenVoice=null;   // 新しい会話では声を選び直す
+  newSessionPitch();
   chat.innerHTML="";
   const c=LANG_CONF[state.lang];
   addNote(`${c.name}・${$("scenario").selectedOptions[0].textContent}（${$("level").selectedOptions[0].textContent}）で稽古を始めます。${greetNote||"🎤 を押すとハンズフリー会話が始まります。"}`);
