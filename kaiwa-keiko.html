@@ -180,7 +180,7 @@ footer{
 
 <header>
   <div class="title-row">
-    <h1>会話稽古<small>VOICE CHAT TUTOR</small></h1>
+    <h1>会話稽古<small>VOICE CHAT TUTOR ver.3</small></h1>
     <button id="btn-settings">⚙ API設定</button>
   </div>
   <div class="controls">
@@ -373,6 +373,7 @@ function speak(text, onDone){
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recog=null, interimEl=null, micStream=null;
 let silenceTimer=null;
+let noSpeechCount=0;        // 音声を検出できないまま聞き直した連続回数（マイク不調の検知用）
 const SPEECH_PAUSE_MS=900;  // 話し終えてからこの時間で聞き取りを打ち切り、すぐに応答へ進む
   // （ブラウザ内蔵の無音判定は数秒かかることがあるため、自前で早めに区切る）
 
@@ -403,11 +404,15 @@ async function startRecognition(){
     state.recognizing=true;
     micBtn.classList.add("rec");
     micBtn.textContent="🎤";
-    micStatus.textContent = `聞き取り中…（${LANG_CONF[state.lang].name}で話してください）`;
+    // 音声を検出できないまま聞き直しが続いている場合は、原因調査のヒントを表示する
+    micStatus.textContent = noSpeechCount>=2
+      ? `聞き取り中…（音声を検出できていません。Macのマイク入力・音量設定をご確認ください）`
+      : `聞き取り中…（${LANG_CONF[state.lang].name}で話してください）`;
     interimEl = addMsg("user","…");
     interimEl.querySelector(".bubble").classList.add("interim");
   };
   recog.onresult = e=>{
+    noSpeechCount=0;   // 音声が届いている
     let interim="";
     for(let i=e.resultIndex;i<e.results.length;i++){
       if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
@@ -430,6 +435,9 @@ async function startRecognition(){
     }else if(e.error==="network"){
       stopSession();
       micStatus.textContent="音声認識サーバーに接続できません（ネット接続が必要です）。";
+    }else if(e.error==="audio-capture"){
+      stopSession();
+      micStatus.textContent="マイクから音声を取得できません。Macのシステム設定でマイク入力をご確認ください。";
     }
     // no-speech などは onend 側で自動的に聞き直す
   };
@@ -443,6 +451,7 @@ async function startRecognition(){
     const t=(finalText.trim() || latestText);
     if(discardNext){ discardNext=false; return; }
     if(t){ handleUserUtterance(t); return; }
+    noSpeechCount++;   // 何も聞き取れないまま終了した回数（連続）
     if(state.session){
       // 無応答が一定時間続いたら稽古を終えて講評へ
       if(Date.now()-silenceSince > SILENCE_LIMIT_MS){
@@ -471,6 +480,7 @@ function listenIfIdle(){
 function startSession(){
   state.session=true;
   silenceSince=Date.now();
+  noSpeechCount=0;
   discardNext=false;   // 前回の停止時に残った破棄フラグで初回の発話が消えないように
   micBtn.classList.add("session");
   chosenVoice=null;                 // セッションごとに相手の声をランダムに選び直す
