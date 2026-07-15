@@ -180,7 +180,7 @@ footer{
 
 <header>
   <div class="title-row">
-    <h1>会話稽古<small>VOICE CHAT TUTOR ver.3</small></h1>
+    <h1>会話稽古<small>VOICE CHAT TUTOR ver.4</small></h1>
     <button id="btn-settings">⚙ API設定</button>
   </div>
   <div class="controls">
@@ -359,6 +359,20 @@ function pickVoice(){
   chosenVoice=pickRandomVoice();
   return chosenVoice;
 }
+let speechPrimed=false;   // iOS向けに読み上げエンジンを解除済みかどうか
+/* iOS Safari は「ユーザー操作の中で一度 speak() を呼ぶ」まで、後からプログラムで
+   読み上げられない仕様。マイクを押した瞬間など、必ずタップ内でこれを呼んで解除する。
+   無音（volume=0）の短い発話でエンジンを起こすだけなので、耳には聞こえない。 */
+function primeSpeech(){
+  if(typeof speechSynthesis==="undefined" || speechPrimed) return;
+  try{
+    const u=new SpeechSynthesisUtterance(" ");
+    u.volume=0;
+    speechSynthesis.speak(u);
+    speechSynthesis.resume();   // iOSでは一時停止状態のまま止まることがあるため念のため
+    speechPrimed=true;
+  }catch(e){}
+}
 function speak(text, onDone){
   if(typeof speechSynthesis==="undefined"){ if(onDone) onDone(); return; }
   speechSynthesis.cancel();
@@ -373,6 +387,7 @@ function speak(text, onDone){
   u.rate  = Math.max(0.5, baseRate + (Math.random()-0.5)*0.06);
   if(onDone){ u.onend=onDone; u.onerror=onDone; }
   speechSynthesis.speak(u);
+  speechSynthesis.resume();   // iOSで直後に一時停止状態になり無音になるのを防ぐ
 }
 
 /* ========== 音声認識 ========== */
@@ -765,9 +780,10 @@ function resetConversation(greetNote){
 }
 
 /* ========== イベント ========== */
-micBtn.addEventListener("click", toggleSession);
+micBtn.addEventListener("click", ()=>{ primeSpeech(); toggleSession(); });
 
 $("btn-send").addEventListener("click", ()=>{
+  primeSpeech();   // 送信タップの中で読み上げエンジンを解除しておく（iOS対策）
   const t=$("text-input").value.trim();
   if(!t) return;
   $("text-input").value="";
